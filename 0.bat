@@ -1,1 +1,0 @@
-git remote add origin https://github.com/a1div0/sqlgo.git

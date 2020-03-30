@@ -1,0 +1,36 @@
+{
+    "SqlGoFor": {
+        "Language": "MSSQL",
+        "Version": "11"
+    },
+    "Tables": [
+        {
+            "Scheme": "Entity",
+            "Table": "Users",
+            "OneRow": "User",
+            "History": true,
+            "Hierarhy": false,
+            "Cols": [
+                { "Name": "name", "Type": "nvarchar(255)", "Nullable": false },
+                { "Name": "email", "Type": "nvarchar(255)", "Nullable": false },
+                { "Name": "ext_id", "Type": "nvarchar(255)", "Nullable": true },
+                { "Name": "oauth_service_name", "Type": "nvarchar(255)", "Nullable": false }
+            ]
+        },
+        {
+            "Scheme": "Entity",
+            "Table": "Categories",
+            "OneRow": "Category",
+            "History": false,
+            "Hierarhy": true,
+            "Cols": [
+                { "Name": "project_id", "Type": "bigint" },
+                { "Name": "name", "Type": "nvarchar(255)" },
+                { "Name": "is_minus", "Type": "bit" },
+                { "Name": "sort", "Type": "real" },
+                { "Name": "img_url", "Type": "nvarchar(max)" },
+                { "Name": "visible", "Type": "bit" }
+            ]
+        }
+    ]
+}
