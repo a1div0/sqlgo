@@ -1,15 +1,16 @@
 {
     "SqlGoFor": {
         "Language": "MSSQL",
-        "Version": "11"
+        "Version": "2012"
     },
     "Tables": [
         {
             "Scheme": "Entity",
             "Table": "Users",
             "OneRow": "User",
-            "History": true,
-            "Hierarhy": false,
+            "UseHistory": true,
+            "UseProjectId": false,
+            "UseUserId": false,
             "Cols": [
                 { "Name": "name", "Type": "nvarchar(255)", "Nullable": false },
                 { "Name": "email", "Type": "nvarchar(255)", "Nullable": false },
@@ -21,10 +22,11 @@
             "Scheme": "Entity",
             "Table": "Categories",
             "OneRow": "Category",
-            "History": false,
-            "Hierarhy": true,
+            "UseHistory": false,
+            "UseHierarhy": true,
+            "UseProjectId": true,
+            "UseUserId": true,
             "Cols": [
-                { "Name": "project_id", "Type": "bigint" },
                 { "Name": "name", "Type": "nvarchar(255)" },
                 { "Name": "is_minus", "Type": "bit" },
                 { "Name": "sort", "Type": "real" },
