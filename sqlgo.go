@@ -171,6 +171,7 @@ CREATE PROCEDURE  [Security].[CheckRights]
     ,@project_id BIGINT
     ,@operation NVARCHAR(64)
 AS
+    -- CHECK RIGHTS IS HERE --
 GO
     `)
 
@@ -305,7 +306,7 @@ func mssql_procedure_list(f *os.File, table *TableDescription, ver uint64) (erro
 
 func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (error) {
 
-    // table_name := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
+    table_name := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
     procedure_name := fmt.Sprintf("[%s].[%sMerge]", table.Scheme, table.OneRow)
     one_row := strings.ToLower(table.OneRow)
 
@@ -322,20 +323,132 @@ func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (err
     }
     if (table.UseHierarhy != false) {
         fmt.Fprintf(f, "    ,@%s_parent_id BIGINT\n", one_row)
+        fmt.Fprintf(f, "    ,@%s_is_folder BIT\n", one_row)
     }
-
     for _, col := range table.Cols {
         fmt.Fprintf(f, "    ,@%s_%s %s\n", one_row, col.Name, strings.ToUpper(col.Type))
     }
 
     fmt.Fprintf(f, "AS\n\n")
+    fmt.Fprintf(f, "    DECLARE @processed_record_table TABLE (id BIGINT);\n\n")
+    fmt.Fprintf(f, "    SET NOCOUNT ON;\n\n")
 
+    if ((table.UseUserId != false)&&(table.UseProjectId != false)) {
+        fmt.Fprintf(f, "    EXEC [Security].[CheckRights] @user_id, @project_id, 'Merge';\n\n")
+    }
+
+    fmt.Fprintf(f, "    MERGE %s AS dst\n", table_name)
+    fmt.Fprintf(f, "    USING (\n")
+    fmt.Fprintf(f, "        SELECT\n")
+    fmt.Fprintf(f, "            @%s_id AS [%s_id]\n", one_row, one_row)
+    fmt.Fprintf(f, "            ,0 AS [is_delete]\n")
+
+    if (table.UseProjectId != false) {
+        fmt.Fprintf(f, "            ,@project_id AS [project_id]\n")
+    }
+    if (table.UseHierarhy != false) {
+        fmt.Fprintf(f, "            ,@%s_parent_id AS [%s_parent_id]\n", one_row, one_row)
+        fmt.Fprintf(f, "            ,@%s_is_folder AS [%s_is_folder]\n", one_row, one_row)
+    }
+    if (table.UseUserId != false)  {
+        fmt.Fprintf(f, "            ,@user_id AS [last_hand_user_id]\n") // TODO: это поле всегда должно быть
+    }
+    for _, col := range table.Cols {
+        fmt.Fprintf(f, "            ,@%s_%s AS [%s_%s]\n", one_row, col.Name, one_row, col.Name)
+    }
+
+    fmt.Fprintf(f, "    ) AS src\n")
+    fmt.Fprintf(f, "    ON (dst.%s_id = src.%s_id)\n", one_row, one_row)
+    fmt.Fprintf(f, "    WHEN MATCHED THEN\n")
+    fmt.Fprintf(f, "        UPDATE SET\n")
+    fmt.Fprintf(f, "            [is_delete] = src.[is_delete]\n")
+
+    if (table.UseProjectId != false) {
+        fmt.Fprintf(f, "            ,[project_id] = src.[project_id]\n")
+    }
+    if (table.UseHierarhy != false) {
+        fmt.Fprintf(f, "            ,[%s_parent_id] = src.[%s_parent_id]\n", one_row, one_row)
+        fmt.Fprintf(f, "            ,[%s_is_folder] = src.[%s_is_folder]\n", one_row, one_row)
+    }
+    if (table.UseUserId != false)  {
+        fmt.Fprintf(f, "            ,[last_hand_user_id] = src.[last_hand_user_id]\n")
+    }
+    for _, col := range table.Cols {
+        fmt.Fprintf(f, "            ,[%s_%s] = src.[%s_%s]\n", one_row, col.Name, one_row, col.Name)
+    }
+
+    fmt.Fprintf(f, "    WHEN NOT MATCHED THEN\n")
+    fmt.Fprintf(f, "        INSERT (\n")
+    fmt.Fprintf(f, "            [is_delete]\n")
+
+    if (table.UseProjectId != false) {
+        fmt.Fprintf(f, "            ,[project_id]\n")
+    }
+    if (table.UseHierarhy != false) {
+        fmt.Fprintf(f, "            ,[%s_parent_id]\n", one_row)
+        fmt.Fprintf(f, "            ,[%s_is_folder]\n", one_row)
+    }
+    if (table.UseUserId != false)  {
+        fmt.Fprintf(f, "            ,[last_hand_user_id]\n")
+    }
+    for _, col := range table.Cols {
+        fmt.Fprintf(f, "            ,[%s_%s]\n", one_row, col.Name)
+    }
+
+    fmt.Fprintf(f, "        ) VALUES (\n")
+    fmt.Fprintf(f, "            src.[is_delete]\n")
+
+    if (table.UseProjectId != false) {
+        fmt.Fprintf(f, "            ,src.[project_id]\n")
+    }
+    if (table.UseHierarhy != false) {
+        fmt.Fprintf(f, "            ,src.[%s_parent_id]\n", one_row)
+        fmt.Fprintf(f, "            ,src.[%s_is_folder]\n", one_row)
+    }
+    if (table.UseUserId != false)  {
+        fmt.Fprintf(f, "            ,src.[last_hand_user_id]\n")
+    }
+    for _, col := range table.Cols {
+        fmt.Fprintf(f, "            ,src.[%s_%s]\n", one_row, col.Name)
+    }
+    fmt.Fprintf(f, "    ) OUTPUT\n")
+    fmt.Fprintf(f, "        $ACTION AS [action], ISNULL(DELETED.[%s_id], INSERTED.[%s_id]) AS %s_id;\n", one_row, one_row, one_row)
+    fmt.Fprintf(f, "RETURN\n")
     fmt.Fprintf(f, "GO\n\n")
 
     return nil
 }
 
 func mssql_procedure_delete(f *os.File, table *TableDescription, ver uint64) (error) {
+
+    table_name := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
+    procedure_name := fmt.Sprintf("[%s].[%sDelete]", table.Scheme, table.OneRow)
+    one_row := strings.ToLower(table.OneRow)
+
+    mssql__drop_procedure_if_exists(f, procedure_name, ver)
+
+    fmt.Fprintf(f, "CREATE PROCEDURE  %s\n", procedure_name)
+    fmt.Fprintf(f, "    @%s_id BIGINT\n", one_row)
+
+    if ((table.UseUserId != false)&&(table.UseProjectId != false)) {
+        fmt.Fprintf(f, "    ,@user_id BIGINT\n")
+        fmt.Fprintf(f, "    ,@project_id BIGINT\n")
+    }
+
+    fmt.Fprintf(f, "AS\n\n")
+    fmt.Fprintf(f, "    SET NOCOUNT ON;\n\n")
+
+    if ((table.UseUserId != false)&&(table.UseProjectId != false)) {
+        fmt.Fprintf(f, "    EXEC [Security].[CheckRights] @user_id, @project_id, 'Delete';\n\n")
+    }
+
+    fmt.Fprintf(f, "    UPDATE %s SET\n", table_name)
+    fmt.Fprintf(f, "        is_delete = 1\n")
+    fmt.Fprintf(f, "    WHERE\n")
+    fmt.Fprintf(f, "        %s_id = @%s_id\n\n", one_row, one_row)
+    fmt.Fprintf(f, "RETURN\n")
+    fmt.Fprintf(f, "GO\n\n")
+
     return nil
 }
 
@@ -344,6 +457,8 @@ func mssql_procedure_history(f *os.File, table *TableDescription, ver uint64) (e
 }
 
 func mssql_procedure_test(f *os.File, table *TableDescription, ver uint64) (error) {
+
+    // EXEC [Entity].[CategoryMerge] 0, 1, 2, 0, 0, 'test cat new 4', 0, 1.2, 'https://image.url', 1
     return nil
 }
 

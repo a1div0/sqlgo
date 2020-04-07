@@ -16,6 +16,7 @@ CREATE PROCEDURE  [Security].[CheckRights]
     ,@project_id BIGINT
     ,@operation NVARCHAR(64)
 AS
+    -- CHECK RIGHTS IS HERE --
 GO
     
 IF object_id('[Entity].[Users]', 'U') IS NOT NULL
@@ -67,6 +68,62 @@ CREATE PROCEDURE  [Entity].[UserMerge]
     ,@user_oauth_service_name NVARCHAR(255)
 AS
 
+    DECLARE @processed_record_table TABLE (id BIGINT);
+
+    SET NOCOUNT ON;
+
+    MERGE [Entity].[Users] AS dst
+    USING (
+        SELECT
+            @user_id AS [user_id]
+            ,0 AS [is_delete]
+            ,@user_name AS [user_name]
+            ,@user_email AS [user_email]
+            ,@user_ext_id AS [user_ext_id]
+            ,@user_oauth_service_name AS [user_oauth_service_name]
+    ) AS src
+    ON (dst.user_id = src.user_id)
+    WHEN MATCHED THEN
+        UPDATE SET
+            [is_delete] = src.[is_delete]
+            ,[user_name] = src.[user_name]
+            ,[user_email] = src.[user_email]
+            ,[user_ext_id] = src.[user_ext_id]
+            ,[user_oauth_service_name] = src.[user_oauth_service_name]
+    WHEN NOT MATCHED THEN
+        INSERT (
+            [is_delete]
+            ,[user_name]
+            ,[user_email]
+            ,[user_ext_id]
+            ,[user_oauth_service_name]
+        ) VALUES (
+            src.[is_delete]
+            ,src.[user_name]
+            ,src.[user_email]
+            ,src.[user_ext_id]
+            ,src.[user_oauth_service_name]
+    ) OUTPUT
+        $ACTION AS [action], ISNULL(DELETED.[user_id], INSERTED.[user_id]) AS user_id;
+RETURN
+GO
+
+IF object_id('[Entity].[UserDelete]', 'P') IS NOT NULL
+    DROP PROCEDURE [Entity].[UserDelete]
+GO
+
+CREATE PROCEDURE  [Entity].[UserDelete]
+    @user_id BIGINT
+AS
+
+    SET NOCOUNT ON;
+
+    UPDATE [Entity].[Users] SET
+        is_delete = 1
+    WHERE
+        user_id = @user_id
+
+RETURN
 GO
 
 IF object_id('[Entity].[Categories]', 'U') IS NOT NULL
@@ -129,6 +186,7 @@ CREATE PROCEDURE  [Entity].[CategoryMerge]
     ,@user_id BIGINT
     ,@project_id BIGINT
     ,@category_parent_id BIGINT
+    ,@category_is_folder BIT
     ,@category_name NVARCHAR(255)
     ,@category_is_minus BIT
     ,@category_sort REAL
@@ -136,5 +194,87 @@ CREATE PROCEDURE  [Entity].[CategoryMerge]
     ,@category_visible BIT
 AS
 
+    DECLARE @processed_record_table TABLE (id BIGINT);
+
+    SET NOCOUNT ON;
+
+    EXEC [Security].[CheckRights] @user_id, @project_id, 'Merge';
+
+    MERGE [Entity].[Categories] AS dst
+    USING (
+        SELECT
+            @category_id AS [category_id]
+            ,0 AS [is_delete]
+            ,@project_id AS [project_id]
+            ,@category_parent_id AS [category_parent_id]
+            ,@category_is_folder AS [category_is_folder]
+            ,@user_id AS [last_hand_user_id]
+            ,@category_name AS [category_name]
+            ,@category_is_minus AS [category_is_minus]
+            ,@category_sort AS [category_sort]
+            ,@category_img_url AS [category_img_url]
+            ,@category_visible AS [category_visible]
+    ) AS src
+    ON (dst.category_id = src.category_id)
+    WHEN MATCHED THEN
+        UPDATE SET
+            [is_delete] = src.[is_delete]
+            ,[project_id] = src.[project_id]
+            ,[category_parent_id] = src.[category_parent_id]
+            ,[category_is_folder] = src.[category_is_folder]
+            ,[last_hand_user_id] = src.[last_hand_user_id]
+            ,[category_name] = src.[category_name]
+            ,[category_is_minus] = src.[category_is_minus]
+            ,[category_sort] = src.[category_sort]
+            ,[category_img_url] = src.[category_img_url]
+            ,[category_visible] = src.[category_visible]
+    WHEN NOT MATCHED THEN
+        INSERT (
+            [is_delete]
+            ,[project_id]
+            ,[category_parent_id]
+            ,[category_is_folder]
+            ,[last_hand_user_id]
+            ,[category_name]
+            ,[category_is_minus]
+            ,[category_sort]
+            ,[category_img_url]
+            ,[category_visible]
+        ) VALUES (
+            src.[is_delete]
+            ,src.[project_id]
+            ,src.[category_parent_id]
+            ,src.[category_is_folder]
+            ,src.[last_hand_user_id]
+            ,src.[category_name]
+            ,src.[category_is_minus]
+            ,src.[category_sort]
+            ,src.[category_img_url]
+            ,src.[category_visible]
+    ) OUTPUT
+        $ACTION AS [action], ISNULL(DELETED.[category_id], INSERTED.[category_id]) AS category_id;
+RETURN
+GO
+
+IF object_id('[Entity].[CategoryDelete]', 'P') IS NOT NULL
+    DROP PROCEDURE [Entity].[CategoryDelete]
+GO
+
+CREATE PROCEDURE  [Entity].[CategoryDelete]
+    @category_id BIGINT
+    ,@user_id BIGINT
+    ,@project_id BIGINT
+AS
+
+    SET NOCOUNT ON;
+
+    EXEC [Security].[CheckRights] @user_id, @project_id, 'Delete';
+
+    UPDATE [Entity].[Categories] SET
+        is_delete = 1
+    WHERE
+        category_id = @category_id
+
+RETURN
 GO
 
