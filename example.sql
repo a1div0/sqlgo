@@ -25,10 +25,10 @@ GO
 
 CREATE TABLE [Entity].[Users] (
     [user_id] BIGINT IDENTITY(1,1) NOT NULL
-    ,[user_name] NVARCHAR(255) NOT NULL
-    ,[user_email] NVARCHAR(255) NOT NULL
+    ,[user_name] NVARCHAR(255) NULL
+    ,[user_email] NVARCHAR(255) NULL
     ,[user_ext_id] NVARCHAR(255) NULL
-    ,[user_oauth_service_name] NVARCHAR(255) NOT NULL
+    ,[user_oauth_service_name] NVARCHAR(255) NULL
     ,[is_delete] BIT NOT NULL
 )
 GO
@@ -135,12 +135,11 @@ CREATE TABLE [Entity].[Categories] (
     ,[category_parent_id] BIGINT NOT NULL
     ,[category_is_folder] BIT NOT NULL
     ,[project_id] BIGINT NOT NULL
-    ,[category_name] NVARCHAR(255) NOT NULL
-    ,[category_is_minus] BIT NOT NULL
-    ,[category_sort] REAL NOT NULL
-    ,[category_img_url] NVARCHAR(MAX) NOT NULL
-    ,[category_visible] BIT NOT NULL
-    ,[last_hand_user_id] BIGINT NOT NULL
+    ,[category_name] NVARCHAR(255) NULL
+    ,[category_is_minus] BIT NULL
+    ,[category_sort] REAL NULL
+    ,[category_img_url] NVARCHAR(MAX) NULL
+    ,[category_visible] BIT NULL
     ,[is_delete] BIT NOT NULL
 )
 GO

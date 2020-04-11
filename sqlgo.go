@@ -10,40 +10,51 @@ import (
     "strings"
     "strconv"
     "encoding/json"
+    "path/filepath"
+    "reflect"
 )
+
+type StringSlice []string
 
 type SqlGoForCollect struct {
     Language string
     Version string
 }
 
-type TableDescription struct {
-    Scheme string
-    Table string
-    OneRow string
+type DefaultsDescription struct {
     UseHistory bool
     UseHierarhy bool
     UseProjectId bool
     UseUserId bool
+    Nullable bool
+}
+
+type TableDescription struct {
+    Scheme string
+    Table string
+    OneRow string
+    UseHistory interface{}
+    UseHierarhy interface{}
+    UseProjectId interface{}
+    UseUserId interface{}
     Cols []ColumnDescription
 }
 
 type ColumnDescription struct {
     Name string
     Type string
-    Nullable bool
+    Nullable interface{}
 }
 
 type Configuration struct {
     SqlGoFor SqlGoForCollect
+    Defaults DefaultsDescription
     Tables []TableDescription
 }
 
 func main() {
 
     var cfg Configuration
-
-    output_sql_file_name := "output.sql"
 
     fmt.Println("SQLGO, v1.0")
 
@@ -56,16 +67,24 @@ func main() {
     file_name := os.Args[1]
     file, err := os.Open(file_name)
     if (err != nil) {
-        fmt.Println("Error load sqlgo-file: ", err)
+        fmt.Printf("Error load '%s': %s\n", file_name, err)
         return
     }
 
     decoder := json.NewDecoder(file)
     err = decoder.Decode(&cfg)
     if (err != nil) {
-        fmt.Println("Error decode sqlgo-file: ", err)
+        fmt.Printf("Error decode '%s': %s\n", file_name, err)
         return
     }
+
+    err = cfg_fill_and_validate(&cfg)
+    if (err != nil) {
+        fmt.Printf("Error validate '%s':\n%s\n", file_name, err)
+        return
+    }
+
+    output_sql_file_name := get_filename_without_ext(file_name) + ".sql"
 
     if (cfg.SqlGoFor.Language == "MSSQL") {
         err = mssql_generate_sql(&cfg, output_sql_file_name)
@@ -84,6 +103,72 @@ func main() {
         fmt.Println(err)
     }
     return
+}
+
+func get_filename_without_ext(full_file_name string) (string) {
+    name_ext := filepath.Base(full_file_name)
+    ext := filepath.Ext(name_ext)
+    result := name_ext[:len(name_ext) - len(ext)]
+    return result
+}
+
+func cfg_fill_and_validate(cfg *Configuration) (error) {
+
+    var errors StringSlice
+
+    for n := 0; n < len(cfg.Tables); n++ {
+
+        table := &cfg.Tables[n]
+
+        field_fill_and_validate(table, "UseHistory"    , cfg.Defaults.UseHistory   , &errors)
+        field_fill_and_validate(table, "UseHierarhy"   , cfg.Defaults.UseHierarhy  , &errors)
+        field_fill_and_validate(table, "UseProjectId"  , cfg.Defaults.UseProjectId , &errors)
+        field_fill_and_validate(table, "UseUserId"     , cfg.Defaults.UseUserId    , &errors)
+
+        for m := 0; m < len(table.Cols); m++ {
+            col := &table.Cols[m]
+            field_fill_and_validate(col, "Nullable"  , cfg.Defaults.Nullable     , &errors)
+        }
+
+        if len(errors) > 0 {
+            table_name := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
+            return fmt.Errorf("Table %s:\n%s\n", table_name, strings.Join(errors, "\n"))
+        }
+
+    }
+
+    return nil
+}
+
+func field_fill_and_validate(struct_ptr interface{}, field_name string, default_value bool, errors *StringSlice) {
+
+    reflect_struct := reflect.ValueOf(struct_ptr)
+    fields := reflect_struct.Elem()
+
+    if (fields.Kind() != reflect.Struct) {
+        *errors = append(*errors, "Fields is not struct.")
+        return
+    }
+    field := fields.FieldByName(field_name)
+    if !field.IsValid() {
+        *errors = append(*errors, fmt.Sprintf("Field '%s' is not valid.", field_name))
+        return
+    }
+
+    if field.IsNil() {
+        if !field.CanSet() {
+            *errors = append(*errors, fmt.Sprintf("Field '%s' is not can set.", field_name))
+            return
+        }
+        field.Set(reflect.ValueOf(default_value))
+    } else {
+        reflect_value := reflect.ValueOf(field.Interface())
+        if reflect_value.Kind() != reflect.Bool {
+            *errors = append(*errors, fmt.Sprintf("Field %s %s - must be type is bool.", field_name, reflect_value.Type()))
+            return
+        }
+    }
+
 }
 
 // 2000 --> 8

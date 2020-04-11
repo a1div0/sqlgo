@@ -3,26 +3,31 @@
         "Language": "MSSQL",
         "Version": "2012"
     },
+    "Defaults": {
+        "UseHistory": true,
+        "UseHierarhy": false,
+        "UseProjectId": true,
+        "UseUserId": false,
+        "Nullable": true
+    },
     "Tables": [
         {
             "Scheme": "Entity",
             "Table": "Users",
             "OneRow": "User",
-            "UseHistory": true,
             "UseProjectId": false,
             "UseUserId": false,
             "Cols": [
-                { "Name": "name", "Type": "nvarchar(255)", "Nullable": false },
-                { "Name": "email", "Type": "nvarchar(255)", "Nullable": false },
+                { "Name": "name", "Type": "nvarchar(255)" },
+                { "Name": "email", "Type": "nvarchar(255)" },
                 { "Name": "ext_id", "Type": "nvarchar(255)", "Nullable": true },
-                { "Name": "oauth_service_name", "Type": "nvarchar(255)", "Nullable": false }
+                { "Name": "oauth_service_name", "Type": "nvarchar(255)" }
             ]
         },
         {
             "Scheme": "Entity",
             "Table": "Categories",
             "OneRow": "Category",
-            "UseHistory": false,
             "UseHierarhy": true,
             "UseProjectId": true,
             "UseUserId": true,
