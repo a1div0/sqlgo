@@ -19,6 +19,7 @@ type StringSlice []string
 type SqlGoForCollect struct {
     Language string
     Version string
+    Database string
 }
 
 type DefaultsDescription struct {
@@ -30,7 +31,7 @@ type DefaultsDescription struct {
 }
 
 type TableDescription struct {
-    Scheme string
+    Schema string
     Table string
     OneRow string
     UseHistory interface{}
@@ -131,7 +132,7 @@ func cfg_fill_and_validate(cfg *Configuration) (error) {
         }
 
         if len(errors) > 0 {
-            table_name := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
+            table_name := fmt.Sprintf("[%s].[%s]", table.Schema, table.Table)
             return fmt.Errorf("Table %s:\n%s\n", table_name, strings.Join(errors, "\n"))
         }
 
@@ -196,13 +197,21 @@ func mssql_generate_sql(cfg *Configuration, file_name string) (error) {
     }
     defer file.Close()
 
-    err = mssql_prepare(file, ver)
+    global_use_history := false
+    for _, table := range cfg.Tables {
+        if !global_use_history && table.UseHistory.(bool) {
+            global_use_history = true
+            break
+        }
+    }
+
+    err = mssql_prepare(file, ver, cfg, global_use_history)
     if (err != nil) {
         return err
     }
 
     for _, table := range cfg.Tables {
-        err = mssql_create_table(file, &table, ver)
+        err = mssql_create_table(file, &table, ver, global_use_history)
         if (err != nil) {
             return err
         }
@@ -236,29 +245,66 @@ func mssql_generate_sql(cfg *Configuration, file_name string) (error) {
     return nil
 }
 
-func mssql_prepare(f *os.File, ver uint64) (error) {
+func mssql_prepare(f *os.File, ver uint64, cfg *Configuration, global_use_history bool) (error) {
 
-    fmt.Fprintln(f, `
-IF SCHEMA_ID('Entity') IS NULL
-    EXEC('CREATE SCHEMA Entity');
-GO
+    script := `
+        // USE [master];
+        // DECLARE @need_cdc_enabled BIT = %use_history%
+        // DECLARE @curr_cdc_enabled BIT = (select is_cdc_enabled from sys.databases db where db.name = '%database%');
+        //
+        // USE [%database%];
+        //
+        // IF @need_cdc_enabled = 1 AND @curr_cdc_enabled = 0
+        // 	EXECUTE sys.sp_cdc_enable_db
+        // IF @need_cdc_enabled = 0 AND @curr_cdc_enabled = 1
+        // 	EXECUTE sys.sp_cdc_disable_db
+        // GO
+        //
+        //
+        // IF SCHEMA_ID('Entity') IS NULL
+        //     EXEC('CREATE SCHEMA Entity');
+        // GO
+        //
+        // IF SCHEMA_ID('Security') IS NULL
+        //     EXEC('CREATE SCHEMA Security');
+        // GO
+        //
+        // IF object_id('[Security].[Rights]', 'U') IS NOT NULL
+        //     DROP TABLE [Security].[Rights]
+        // GO
+        //
+        // CREATE TABLE [Security].[Rights] (
+        //     [right_id] BIGINT IDENTITY(1,1) NOT NULL
+        //     ,[user_id] BIGINT NOT NULL
+        //     ,[project_id] BIGINT NOT NULL
+        // 	,[table_name] NVARCHAR(255) NOT NULL
+        //     ,[operation] NVARCHAR(64) NOT NULL
+        // )
+        // GO
+        //
+        // IF object_id('[Security].[CheckRights]', 'P') IS NOT NULL
+        //     DROP PROCEDURE [Security].[CheckRights]
+        // GO
+        //
+        // CREATE PROCEDURE  [Security].[CheckRights]
+        //     @user_id BIGINT
+        //     ,@project_id BIGINT
+        //     ,@table_name NVARCHAR(255)
+        //     ,@operation NVARCHAR(64)
+        // AS
+        //     -- CHECK RIGHTS IS HERE --
+        // GO
+    `
 
-IF SCHEMA_ID('Security') IS NULL
-    EXEC('CREATE SCHEMA Security');
-GO
+    var b2i = map[bool]string{false: "0", true: "1"}
+    script__use_history := b2i[global_use_history]
 
-IF object_id('[Security].[CheckRights]', 'P') IS NOT NULL
-    DROP PROCEDURE [Security].[CheckRights]
-GO
+    script = strings.ReplaceAll(script, "        // ", "")
+    script = strings.ReplaceAll(script, "        //", "")
+    script = strings.ReplaceAll(script, "%use_history%", script__use_history)
+    script = strings.ReplaceAll(script, "%database%", cfg.SqlGoFor.Database)
 
-CREATE PROCEDURE  [Security].[CheckRights]
-    @user_id BIGINT
-    ,@project_id BIGINT
-    ,@operation NVARCHAR(64)
-AS
-    -- CHECK RIGHTS IS HERE --
-GO
-    `)
+    fmt.Fprintln(f, script)
 
     return nil
 }
@@ -266,11 +312,9 @@ GO
 func mssql__drop_procedure_if_exists(f *os.File, procedure_name string, ver uint64) {
 
     if (ver < 2016) {
-
         fmt.Fprintf(f, "IF object_id('%s', 'P') IS NOT NULL\n", procedure_name)
         fmt.Fprintf(f, "    DROP PROCEDURE %s\n", procedure_name)
         fmt.Fprintf(f, "GO\n\n")
-
     } else {
         fmt.Fprintf(f, "DROP PROCEDURE IF EXISTS %s\n", procedure_name)
         fmt.Fprintf(f, "GO\n\n")
@@ -278,40 +322,61 @@ func mssql__drop_procedure_if_exists(f *os.File, procedure_name string, ver uint
 
 }
 
-func mssql_create_table(f *os.File, table *TableDescription, ver uint64) (error) {
+func init_names(table *TableDescription, procedure_postfix string) (string, string, string) {
+
+    table_name := fmt.Sprintf("[%s].[%s]", table.Schema, table.Table)
+    one_row := strings.ToLower(table.OneRow)
+    proc_name := fmt.Sprintf("[%s].[%s%s]", table.Schema, table.OneRow, procedure_postfix)
+
+    return table_name, one_row, proc_name
+}
+
+func default_procedure_top(f *os.File, table_name string, use_user_id bool, use_project_id bool, op string) {
+
+    if use_user_id {
+        if use_project_id {
+            fmt.Fprintf(f, "    EXEC [Security].[CheckRights] @user_id, @project_id, '%s', '%s';\n", table_name, op)
+        } else {
+            fmt.Fprintf(f, "    EXEC [Security].[CheckRights] @user_id, 0, '%s', '%s';\n", table_name, op)
+        }
+    }
+    fmt.Fprintf(f, "    SET NOCOUNT ON;\n\n")
+
+}
+
+func mssql_create_table(f *os.File, table *TableDescription, ver uint64, global_use_history bool) (error) {
 
     var nullable string
 
-    TableName := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
-    one_row := strings.ToLower(table.OneRow)
+    table_name, one_row, _ := init_names(table, "")
 
     if (ver < 2016) {
 
-        fmt.Fprintf(f, "IF object_id('%s', 'U') IS NOT NULL\n", TableName)
-        fmt.Fprintf(f, "    DROP TABLE %s\n", TableName)
+        fmt.Fprintf(f, "IF object_id('%s', 'U') IS NOT NULL\n", table_name)
+        fmt.Fprintf(f, "    DROP TABLE %s\n", table_name)
         fmt.Fprintf(f, "GO\n\n")
 
     } else {
-        fmt.Fprintf(f, "DROP TABLE IF EXISTS %s\n", TableName)
+        fmt.Fprintf(f, "DROP TABLE IF EXISTS %s\n", table_name)
         fmt.Fprintf(f, "GO\n\n")
     }
 
-    fmt.Fprintf(f, "CREATE TABLE %s (\n", TableName)
+    fmt.Fprintf(f, "CREATE TABLE %s (\n", table_name)
 
     fmt.Fprintf(f, "    [%s_id] BIGINT IDENTITY(1,1) NOT NULL\n", one_row)
 
-    if (table.UseHierarhy == true) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "    ,[%s_parent_id] BIGINT NOT NULL\n", one_row)
         fmt.Fprintf(f, "    ,[%s_is_folder] BIT NOT NULL\n", one_row)
     }
 
-    if (table.UseProjectId != false) {
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "    ,[project_id] BIGINT NOT NULL\n")
     }
 
     for _, col := range table.Cols {
 
-        if (col.Nullable == true) {
+        if col.Nullable.(bool) {
             nullable = "NULL"
         } else {
             nullable = "NOT NULL"
@@ -319,12 +384,56 @@ func mssql_create_table(f *os.File, table *TableDescription, ver uint64) (error)
 
         fmt.Fprintf(f, "    ,[%s_%s] %s %s\n", one_row, col.Name, strings.ToUpper(col.Type), nullable)
     }
-
-    if (table.UseHistory != true) {
-        fmt.Fprintf(f, "    ,[last_hand_user_id] BIGINT NOT NULL\n")
+    if table.UseUserId.(bool) {
+        fmt.Fprintf(f, "    ,[user_id] BIGINT NOT NULL\n")
     }
+    fmt.Fprintf(f, "    ,[dt] DATETIME NOT NULL\n")
     fmt.Fprintf(f, "    ,[is_delete] BIT NOT NULL\n")
-    fmt.Fprintf(f, ")\n")
+    fmt.Fprintf(f, "    ,CONSTRAINT PK_%s_%sID PRIMARY KEY CLUSTERED ([%s_id] ASC)\n", table.Table, table.OneRow, one_row)
+    fmt.Fprintf(f, ")\n\n")
+
+    history_script := ""
+
+    if table.UseHistory.(bool) {
+        history_script = `
+            // IF (
+            // 		select is_tracked_by_cdc from sys.tables t
+            // 		inner join sys.schemas s
+            // 		on t.schema_id = s.schema_id
+            // 		where
+            // 			s.[name] = N'%schema%'
+            // 			and t.[name] = N'%table%'
+            // 	) = 0
+            // 	EXEC sys.sp_cdc_enable_table
+            // 		@source_schema = N'%schema%',
+            // 		@source_name   = N'%table%',
+            // 		@role_name     = NULL,
+            //      @capture_instance = N'%schema%_%table%',
+            // 		@supports_net_changes = 1;
+        `
+    } else if global_use_history {
+        history_script = `
+            // IF (
+            // 		select is_tracked_by_cdc from sys.tables t
+            // 		inner join sys.schemas s
+            // 		on t.schema_id = s.schema_id
+            // 		where
+            // 			s.[name] = N'%schema%'
+            // 			and t.[name] = N'%s'
+            // 	) = 1
+            // 	EXEC sys.sp_cdc_disable_table
+            // 		@source_schema = N'%schema%',
+            // 		@source_name   = N'%table%',
+            // 		@capture_instance = N'%schema%_%table%';
+        `
+    }
+
+    history_script = strings.ReplaceAll(history_script, "            // ", "")
+    history_script = strings.ReplaceAll(history_script, "            //", "")
+    history_script = strings.ReplaceAll(history_script, "%schema%", table.Schema)
+    history_script = strings.ReplaceAll(history_script, "%table%", table.Table)
+
+    fmt.Fprintf(f, history_script)
     fmt.Fprintf(f, "GO\n\n")
 
     return nil
@@ -332,36 +441,29 @@ func mssql_create_table(f *os.File, table *TableDescription, ver uint64) (error)
 
 func mssql_procedure_list(f *os.File, table *TableDescription, ver uint64) (error) {
 
-    table_name := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
-    procedure_name := fmt.Sprintf("[%s].[%sList]", table.Scheme, table.OneRow)
-    one_row := strings.ToLower(table.OneRow)
-
+    table_name, one_row, procedure_name := init_names(table, "List")
     mssql__drop_procedure_if_exists(f, procedure_name, ver)
 
     fmt.Fprintf(f, "CREATE PROCEDURE  %s\n", procedure_name)
     term := ""
-    if (table.UseUserId != false) {
+    if table.UseUserId.(bool) {
         fmt.Fprintf(f, "    @user_id BIGINT\n")
         term = ","
     }
-    if (table.UseProjectId != false) {
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "    %s@project_id BIGINT\n", term)
         term = ","
     }
-    if (table.UseHierarhy != false) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "    %s@%s_parent_id BIGINT\n", term, one_row)
         term = ","
     }
     fmt.Fprintf(f, "AS\n\n")
+    default_procedure_top(f, table_name, table.UseUserId.(bool), table.UseProjectId.(bool), "List")
 
-    if ((table.UseProjectId != false) && (table.UseUserId != false)) {
-        fmt.Fprintf(f, "    EXEC [Security].[CheckRights] @user_id, @project_id, 'List';\n")
-    }
-
-    fmt.Fprintf(f, "    SET NOCOUNT ON;\n\n")
     fmt.Fprintf(f, "    SELECT\n")
     fmt.Fprintf(f, "        t.[%s_id] [%s_id]\n", one_row, one_row)
-    if (table.UseHierarhy != false) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "        ,t.[%s_parent_id] [%s_parent_id]\n", one_row, one_row)
         fmt.Fprintf(f, "        ,t.[%s_is_folder] [%s_is_folder]\n", one_row, one_row)
     }
@@ -375,10 +477,10 @@ func mssql_procedure_list(f *os.File, table *TableDescription, ver uint64) (erro
     fmt.Fprintf(f, "    WHERE\n")
     fmt.Fprintf(f, "        t.is_delete = 0\n")
 
-    if (table.UseProjectId != false) {
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "        AND t.project_id = project_id\n")
     }
-    if (table.UseHierarhy != false) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "        AND t.%s_parent_id = %s_parent_id\n", one_row, one_row)
     }
 
@@ -391,22 +493,19 @@ func mssql_procedure_list(f *os.File, table *TableDescription, ver uint64) (erro
 
 func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (error) {
 
-    table_name := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
-    procedure_name := fmt.Sprintf("[%s].[%sMerge]", table.Scheme, table.OneRow)
-    one_row := strings.ToLower(table.OneRow)
-
+    table_name, one_row, procedure_name := init_names(table, "Merge")
     mssql__drop_procedure_if_exists(f, procedure_name, ver)
 
     fmt.Fprintf(f, "CREATE PROCEDURE  %s\n", procedure_name)
     fmt.Fprintf(f, "    @%s_id BIGINT\n", one_row)
 
-    if (table.UseUserId != false) {
+    if table.UseUserId.(bool) {
         fmt.Fprintf(f, "    ,@user_id BIGINT\n")
     }
-    if (table.UseProjectId != false) {
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "    ,@project_id BIGINT\n")
     }
-    if (table.UseHierarhy != false) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "    ,@%s_parent_id BIGINT\n", one_row)
         fmt.Fprintf(f, "    ,@%s_is_folder BIT\n", one_row)
     }
@@ -415,28 +514,24 @@ func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (err
     }
 
     fmt.Fprintf(f, "AS\n\n")
-    fmt.Fprintf(f, "    DECLARE @processed_record_table TABLE (id BIGINT);\n\n")
-    fmt.Fprintf(f, "    SET NOCOUNT ON;\n\n")
-
-    if ((table.UseUserId != false)&&(table.UseProjectId != false)) {
-        fmt.Fprintf(f, "    EXEC [Security].[CheckRights] @user_id, @project_id, 'Merge';\n\n")
-    }
+    default_procedure_top(f, table_name, table.UseUserId.(bool), table.UseProjectId.(bool), "Merge")
 
     fmt.Fprintf(f, "    MERGE %s AS dst\n", table_name)
     fmt.Fprintf(f, "    USING (\n")
     fmt.Fprintf(f, "        SELECT\n")
     fmt.Fprintf(f, "            @%s_id AS [%s_id]\n", one_row, one_row)
     fmt.Fprintf(f, "            ,0 AS [is_delete]\n")
+    fmt.Fprintf(f, "            ,GETDATE() AS [dt]\n")
 
-    if (table.UseProjectId != false) {
+    if table.UseUserId.(bool)  {
+        fmt.Fprintf(f, "            ,@user_id AS [user_id]\n") // TODO: это поле всегда должно быть
+    }
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "            ,@project_id AS [project_id]\n")
     }
-    if (table.UseHierarhy != false) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "            ,@%s_parent_id AS [%s_parent_id]\n", one_row, one_row)
         fmt.Fprintf(f, "            ,@%s_is_folder AS [%s_is_folder]\n", one_row, one_row)
-    }
-    if (table.UseUserId != false)  {
-        fmt.Fprintf(f, "            ,@user_id AS [last_hand_user_id]\n") // TODO: это поле всегда должно быть
     }
     for _, col := range table.Cols {
         fmt.Fprintf(f, "            ,@%s_%s AS [%s_%s]\n", one_row, col.Name, one_row, col.Name)
@@ -447,16 +542,17 @@ func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (err
     fmt.Fprintf(f, "    WHEN MATCHED THEN\n")
     fmt.Fprintf(f, "        UPDATE SET\n")
     fmt.Fprintf(f, "            [is_delete] = src.[is_delete]\n")
+    fmt.Fprintf(f, "            ,[dt] = src.[dt]\n")
 
-    if (table.UseProjectId != false) {
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "            ,[project_id] = src.[project_id]\n")
     }
-    if (table.UseHierarhy != false) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "            ,[%s_parent_id] = src.[%s_parent_id]\n", one_row, one_row)
         fmt.Fprintf(f, "            ,[%s_is_folder] = src.[%s_is_folder]\n", one_row, one_row)
     }
-    if (table.UseUserId != false)  {
-        fmt.Fprintf(f, "            ,[last_hand_user_id] = src.[last_hand_user_id]\n")
+    if table.UseUserId.(bool)  {
+        fmt.Fprintf(f, "            ,[user_id] = src.[user_id]\n")
     }
     for _, col := range table.Cols {
         fmt.Fprintf(f, "            ,[%s_%s] = src.[%s_%s]\n", one_row, col.Name, one_row, col.Name)
@@ -465,16 +561,17 @@ func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (err
     fmt.Fprintf(f, "    WHEN NOT MATCHED THEN\n")
     fmt.Fprintf(f, "        INSERT (\n")
     fmt.Fprintf(f, "            [is_delete]\n")
+    fmt.Fprintf(f, "            ,[dt]\n")
 
-    if (table.UseProjectId != false) {
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "            ,[project_id]\n")
     }
-    if (table.UseHierarhy != false) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "            ,[%s_parent_id]\n", one_row)
         fmt.Fprintf(f, "            ,[%s_is_folder]\n", one_row)
     }
-    if (table.UseUserId != false)  {
-        fmt.Fprintf(f, "            ,[last_hand_user_id]\n")
+    if table.UseUserId.(bool)  {
+        fmt.Fprintf(f, "            ,[user_id]\n")
     }
     for _, col := range table.Cols {
         fmt.Fprintf(f, "            ,[%s_%s]\n", one_row, col.Name)
@@ -482,16 +579,17 @@ func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (err
 
     fmt.Fprintf(f, "        ) VALUES (\n")
     fmt.Fprintf(f, "            src.[is_delete]\n")
+    fmt.Fprintf(f, "            ,src.[dt]\n")
 
-    if (table.UseProjectId != false) {
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "            ,src.[project_id]\n")
     }
-    if (table.UseHierarhy != false) {
+    if table.UseHierarhy.(bool) {
         fmt.Fprintf(f, "            ,src.[%s_parent_id]\n", one_row)
         fmt.Fprintf(f, "            ,src.[%s_is_folder]\n", one_row)
     }
-    if (table.UseUserId != false)  {
-        fmt.Fprintf(f, "            ,src.[last_hand_user_id]\n")
+    if table.UseUserId.(bool) {
+        fmt.Fprintf(f, "            ,src.[user_id]\n")
     }
     for _, col := range table.Cols {
         fmt.Fprintf(f, "            ,src.[%s_%s]\n", one_row, col.Name)
@@ -506,31 +604,39 @@ func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (err
 
 func mssql_procedure_delete(f *os.File, table *TableDescription, ver uint64) (error) {
 
-    table_name := fmt.Sprintf("[%s].[%s]", table.Scheme, table.Table)
-    procedure_name := fmt.Sprintf("[%s].[%sDelete]", table.Scheme, table.OneRow)
-    one_row := strings.ToLower(table.OneRow)
-
+    table_name, one_row, procedure_name := init_names(table, "Delete")
     mssql__drop_procedure_if_exists(f, procedure_name, ver)
 
     fmt.Fprintf(f, "CREATE PROCEDURE  %s\n", procedure_name)
     fmt.Fprintf(f, "    @%s_id BIGINT\n", one_row)
 
-    if ((table.UseUserId != false)&&(table.UseProjectId != false)) {
+    if table.UseUserId.(bool) {
         fmt.Fprintf(f, "    ,@user_id BIGINT\n")
+    }
+    if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "    ,@project_id BIGINT\n")
     }
 
     fmt.Fprintf(f, "AS\n\n")
-    fmt.Fprintf(f, "    SET NOCOUNT ON;\n\n")
+    default_procedure_top(f, table_name, table.UseUserId.(bool), table.UseProjectId.(bool), "Delete")
 
-    if ((table.UseUserId != false)&&(table.UseProjectId != false)) {
-        fmt.Fprintf(f, "    EXEC [Security].[CheckRights] @user_id, @project_id, 'Delete';\n\n")
+    script := `
+        //     UPDATE %table_name% SET
+        //         is_delete = 1
+        //         ,dt = GETDATE()
+        //         {,user_id = @user_id}
+        //     WHERE
+        //         %one_row%_id = @%one_row%_id
+    `
+
+    script = strings.ReplaceAll(script, "        // ", "")
+    script = strings.ReplaceAll(script, "%table_name%", table_name)
+    script = strings.ReplaceAll(script, "%one_row%", one_row)
+
+    if !table.UseUserId.(bool) {
+        script = strings.ReplaceAll(script, "{,user_id = @user_id}", "")
     }
 
-    fmt.Fprintf(f, "    UPDATE %s SET\n", table_name)
-    fmt.Fprintf(f, "        is_delete = 1\n")
-    fmt.Fprintf(f, "    WHERE\n")
-    fmt.Fprintf(f, "        %s_id = @%s_id\n\n", one_row, one_row)
     fmt.Fprintf(f, "RETURN\n")
     fmt.Fprintf(f, "GO\n\n")
 
@@ -538,6 +644,46 @@ func mssql_procedure_delete(f *os.File, table *TableDescription, ver uint64) (er
 }
 
 func mssql_procedure_history(f *os.File, table *TableDescription, ver uint64) (error) {
+    if !table.UseHistory.(bool) {
+        return nil
+    }
+
+    table_name, one_row, procedure_name := init_names(table, "History")
+    mssql__drop_procedure_if_exists(f, procedure_name, ver)
+
+    fmt.Fprintf(f, "CREATE PROCEDURE  %s\n", procedure_name)
+    fmt.Fprintf(f, "    @%s_id BIGINT\n", one_row)
+
+    if table.UseUserId.(bool) {
+        fmt.Fprintf(f, "    ,@user_id BIGINT\n")
+    }
+    if table.UseProjectId.(bool) {
+        fmt.Fprintf(f, "    ,@project_id BIGINT\n")
+    }
+
+    fmt.Fprintf(f, "AS\n\n")
+    default_procedure_top(f, table_name, table.UseUserId.(bool), table.UseProjectId.(bool), "History")
+
+    script := `
+        //     SELECT
+        //         *
+        //     FROM
+        //         cdc.%schema%_%table%_CT
+        //     WHERE
+        //         [category_id] = @%one_row%_id
+        //     ORDER BY
+        //         __$start_lsn DESC
+    `
+
+    script = strings.ReplaceAll(script, "        // ", "")
+    script = strings.ReplaceAll(script, "%schema%", table.Schema)
+    script = strings.ReplaceAll(script, "%table%", table.Table)
+    script = strings.ReplaceAll(script, "%one_row%", one_row)
+
+    fmt.Fprintf(f, script)
+    fmt.Fprintf(f, "RETURN\n")
+    fmt.Fprintf(f, "GO\n\n")
+
     return nil
 }
 

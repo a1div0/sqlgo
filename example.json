@@ -1,7 +1,8 @@
 {
     "SqlGoFor": {
         "Language": "MSSQL",
-        "Version": "2012"
+        "Version": "2012",
+        "Database": "balance"
     },
     "Defaults": {
         "UseHistory": true,
@@ -12,7 +13,7 @@
     },
     "Tables": [
         {
-            "Scheme": "Entity",
+            "Schema": "Entity",
             "Table": "Users",
             "OneRow": "User",
             "UseProjectId": false,
@@ -25,7 +26,7 @@
             ]
         },
         {
-            "Scheme": "Entity",
+            "Schema": "Entity",
             "Table": "Categories",
             "OneRow": "Category",
             "UseHierarhy": true,
