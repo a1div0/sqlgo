@@ -211,7 +211,7 @@ func mssql_generate_sql(cfg *Configuration, file_name string) (error) {
     }
 
     for _, table := range cfg.Tables {
-        err = mssql_create_table(file, &table, ver, global_use_history)
+        err = mssql_create_table(file, &table, ver)
         if (err != nil) {
             return err
         }
@@ -240,6 +240,11 @@ func mssql_generate_sql(cfg *Configuration, file_name string) (error) {
         if (err != nil) {
             return err
         }
+
+        err = mssql_finish(file)
+        if (err != nil) {
+            return err
+        }
     }
 
     return nil
@@ -249,17 +254,14 @@ func mssql_prepare(f *os.File, ver uint64, cfg *Configuration, global_use_histor
 
     script := `
         // USE [master];
-        // DECLARE @need_cdc_enabled BIT = %use_history%
         // DECLARE @curr_cdc_enabled BIT = (select is_cdc_enabled from sys.databases db where db.name = '%database%');
         //
         // USE [%database%];
-        //
-        // IF @need_cdc_enabled = 1 AND @curr_cdc_enabled = 0
-        // 	EXECUTE sys.sp_cdc_enable_db
-        // IF @need_cdc_enabled = 0 AND @curr_cdc_enabled = 1
-        // 	EXECUTE sys.sp_cdc_disable_db
+        // IF @curr_cdc_enabled = 1
+        // EXECUTE sys.sp_cdc_disable_db
         // GO
         //
+        // %script_cdc_on%
         //
         // IF SCHEMA_ID('Entity') IS NULL
         //     EXEC('CREATE SCHEMA Entity');
@@ -296,13 +298,28 @@ func mssql_prepare(f *os.File, ver uint64, cfg *Configuration, global_use_histor
         // GO
     `
 
-    var b2i = map[bool]string{false: "0", true: "1"}
-    script__use_history := b2i[global_use_history]
+    script_cdc_on := `
+        // EXECUTE sys.sp_cdc_enable_db;
+        // GO
+    `
 
+    if global_use_history {
+        script = strings.ReplaceAll(script, "%script_cdc_on%", script_cdc_on)
+    }
     script = strings.ReplaceAll(script, "        // ", "")
     script = strings.ReplaceAll(script, "        //", "")
-    script = strings.ReplaceAll(script, "%use_history%", script__use_history)
     script = strings.ReplaceAll(script, "%database%", cfg.SqlGoFor.Database)
+
+    fmt.Fprintln(f, script)
+
+    return nil
+}
+
+func mssql_finish(f *os.File) (error) {
+    script := `
+    `
+    script = strings.ReplaceAll(script, "        // ", "")
+    script = strings.ReplaceAll(script, "        //", "")
 
     fmt.Fprintln(f, script)
 
@@ -311,15 +328,15 @@ func mssql_prepare(f *os.File, ver uint64, cfg *Configuration, global_use_histor
 
 func mssql__drop_procedure_if_exists(f *os.File, procedure_name string, ver uint64) {
 
-    if (ver < 2016) {
+    if ver < 2016 {
         fmt.Fprintf(f, "IF object_id('%s', 'P') IS NOT NULL\n", procedure_name)
-        fmt.Fprintf(f, "    DROP PROCEDURE %s\n", procedure_name)
-        fmt.Fprintf(f, "GO\n\n")
+        fmt.Fprintf(f, "    DROP PROCEDURE %s;\n", procedure_name)
     } else {
-        fmt.Fprintf(f, "DROP PROCEDURE IF EXISTS %s\n", procedure_name)
-        fmt.Fprintf(f, "GO\n\n")
+        fmt.Fprintf(f, "DROP PROCEDURE IF EXISTS %s;\n", procedure_name)
     }
 
+    fmt.Fprintln(f, "GO")
+    fmt.Fprintln(f, "")
 }
 
 func init_names(table *TableDescription, procedure_postfix string) (string, string, string) {
@@ -344,7 +361,7 @@ func default_procedure_top(f *os.File, table_name string, use_user_id bool, use_
 
 }
 
-func mssql_create_table(f *os.File, table *TableDescription, ver uint64, global_use_history bool) (error) {
+func mssql_create_table(f *os.File, table *TableDescription, ver uint64) (error) {
 
     var nullable string
 
@@ -353,13 +370,14 @@ func mssql_create_table(f *os.File, table *TableDescription, ver uint64, global_
     if (ver < 2016) {
 
         fmt.Fprintf(f, "IF object_id('%s', 'U') IS NOT NULL\n", table_name)
-        fmt.Fprintf(f, "    DROP TABLE %s\n", table_name)
-        fmt.Fprintf(f, "GO\n\n")
+        fmt.Fprintf(f, "    DROP TABLE %s;\n", table_name)
 
     } else {
-        fmt.Fprintf(f, "DROP TABLE IF EXISTS %s\n", table_name)
-        fmt.Fprintf(f, "GO\n\n")
+        fmt.Fprintf(f, "DROP TABLE IF EXISTS %s;\n", table_name)
     }
+
+    fmt.Fprintln(f, "GO")
+    fmt.Fprintln(f, "")
 
     fmt.Fprintf(f, "CREATE TABLE %s (\n", table_name)
 
@@ -390,41 +408,21 @@ func mssql_create_table(f *os.File, table *TableDescription, ver uint64, global_
     fmt.Fprintf(f, "    ,[dt] DATETIME NOT NULL\n")
     fmt.Fprintf(f, "    ,[is_delete] BIT NOT NULL\n")
     fmt.Fprintf(f, "    ,CONSTRAINT PK_%s_%sID PRIMARY KEY CLUSTERED ([%s_id] ASC)\n", table.Table, table.OneRow, one_row)
-    fmt.Fprintf(f, ")\n\n")
+    fmt.Fprintf(f, ")\n")
+
+    fmt.Fprintln(f, "GO")
+    fmt.Fprintln(f, "")
 
     history_script := ""
 
     if table.UseHistory.(bool) {
         history_script = `
-            // IF (
-            // 		select is_tracked_by_cdc from sys.tables t
-            // 		inner join sys.schemas s
-            // 		on t.schema_id = s.schema_id
-            // 		where
-            // 			s.[name] = N'%schema%'
-            // 			and t.[name] = N'%table%'
-            // 	) = 0
             // 	EXEC sys.sp_cdc_enable_table
             // 		@source_schema = N'%schema%',
             // 		@source_name   = N'%table%',
             // 		@role_name     = NULL,
             //      @capture_instance = N'%schema%_%table%',
-            // 		@supports_net_changes = 1;
-        `
-    } else if global_use_history {
-        history_script = `
-            // IF (
-            // 		select is_tracked_by_cdc from sys.tables t
-            // 		inner join sys.schemas s
-            // 		on t.schema_id = s.schema_id
-            // 		where
-            // 			s.[name] = N'%schema%'
-            // 			and t.[name] = N'%s'
-            // 	) = 1
-            // 	EXEC sys.sp_cdc_disable_table
-            // 		@source_schema = N'%schema%',
-            // 		@source_name   = N'%table%',
-            // 		@capture_instance = N'%schema%_%table%';
+            // 		@supports_net_changes = 1
         `
     }
 
@@ -434,7 +432,9 @@ func mssql_create_table(f *os.File, table *TableDescription, ver uint64, global_
     history_script = strings.ReplaceAll(history_script, "%table%", table.Table)
 
     fmt.Fprintf(f, history_script)
-    fmt.Fprintf(f, "GO\n\n")
+
+    fmt.Fprintln(f, "GO")
+    fmt.Fprintln(f, "")
 
     return nil
 }
@@ -485,8 +485,10 @@ func mssql_procedure_list(f *os.File, table *TableDescription, ver uint64) (erro
     }
 
     fmt.Fprintf(f, "    ;\n")
-    fmt.Fprintf(f, "RETURN\n")
-    fmt.Fprintf(f, "GO\n\n")
+    fmt.Fprintf(f, "RETURN\n\n")
+
+    fmt.Fprintln(f, "GO")
+    fmt.Fprintln(f, "")
 
     return nil
 }
@@ -524,7 +526,7 @@ func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (err
     fmt.Fprintf(f, "            ,GETDATE() AS [dt]\n")
 
     if table.UseUserId.(bool)  {
-        fmt.Fprintf(f, "            ,@user_id AS [user_id]\n") // TODO: это поле всегда должно быть
+        fmt.Fprintf(f, "            ,@user_id AS [user_id]\n")
     }
     if table.UseProjectId.(bool) {
         fmt.Fprintf(f, "            ,@project_id AS [project_id]\n")
@@ -596,8 +598,10 @@ func mssql_procedure_merge(f *os.File, table *TableDescription, ver uint64) (err
     }
     fmt.Fprintf(f, "    ) OUTPUT\n")
     fmt.Fprintf(f, "        $ACTION AS [action], ISNULL(DELETED.[%s_id], INSERTED.[%s_id]) AS %s_id;\n", one_row, one_row, one_row)
-    fmt.Fprintf(f, "RETURN\n")
-    fmt.Fprintf(f, "GO\n\n")
+    fmt.Fprintf(f, "RETURN\n\n")
+
+    fmt.Fprintln(f, "GO")
+    fmt.Fprintln(f, "")
 
     return nil
 }
@@ -633,12 +637,17 @@ func mssql_procedure_delete(f *os.File, table *TableDescription, ver uint64) (er
     script = strings.ReplaceAll(script, "%table_name%", table_name)
     script = strings.ReplaceAll(script, "%one_row%", one_row)
 
-    if !table.UseUserId.(bool) {
+    if table.UseUserId.(bool) {
+        script = strings.ReplaceAll(script, "{,user_id = @user_id}", ",user_id = @user_id")
+    } else {
         script = strings.ReplaceAll(script, "{,user_id = @user_id}", "")
     }
 
-    fmt.Fprintf(f, "RETURN\n")
-    fmt.Fprintf(f, "GO\n\n")
+    fmt.Fprintf(f, script)
+    fmt.Fprintf(f, "RETURN\n\n")
+
+    fmt.Fprintln(f, "GO")
+    fmt.Fprintln(f, "")
 
     return nil
 }
@@ -670,7 +679,7 @@ func mssql_procedure_history(f *os.File, table *TableDescription, ver uint64) (e
         //     FROM
         //         cdc.%schema%_%table%_CT
         //     WHERE
-        //         [category_id] = @%one_row%_id
+        //         [%one_row%_id] = @%one_row%_id
         //     ORDER BY
         //         __$start_lsn DESC
     `
@@ -682,7 +691,9 @@ func mssql_procedure_history(f *os.File, table *TableDescription, ver uint64) (e
 
     fmt.Fprintf(f, script)
     fmt.Fprintf(f, "RETURN\n")
-    fmt.Fprintf(f, "GO\n\n")
+
+    fmt.Fprintln(f, "GO")
+    fmt.Fprintln(f, "")
 
     return nil
 }

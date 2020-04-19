@@ -1,16 +1,16 @@
 
 USE [master];
-DECLARE @need_cdc_enabled BIT = 1
-DECLARE @curr_cdc_enabled BIT = (select is_cdc_enabled from sys.databases db where db.name = 'balance');
+DECLARE @curr_cdc_enabled BIT = (select is_cdc_enabled from sys.databases db where db.name = 'test');
 
-USE [balance];
-
-IF @need_cdc_enabled = 1 AND @curr_cdc_enabled = 0
-	EXECUTE sys.sp_cdc_enable_db
-IF @need_cdc_enabled = 0 AND @curr_cdc_enabled = 1
-	EXECUTE sys.sp_cdc_disable_db
+USE [test];
+IF @curr_cdc_enabled = 1
+EXECUTE sys.sp_cdc_disable_db
 GO
 
+
+EXECUTE sys.sp_cdc_enable_db;
+GO
+    
 
 IF SCHEMA_ID('Entity') IS NULL
     EXEC('CREATE SCHEMA Entity');
@@ -47,7 +47,7 @@ AS
 GO
     
 IF object_id('[Entity].[Users]', 'U') IS NOT NULL
-    DROP TABLE [Entity].[Users]
+    DROP TABLE [Entity].[Users];
 GO
 
 CREATE TABLE [Entity].[Users] (
@@ -60,26 +60,19 @@ CREATE TABLE [Entity].[Users] (
     ,[is_delete] BIT NOT NULL
     ,CONSTRAINT PK_Users_UserID PRIMARY KEY CLUSTERED ([user_id] ASC)
 )
+GO
 
 
-IF (
-		select is_tracked_by_cdc from sys.tables t
-		inner join sys.schemas s
-		on t.schema_id = s.schema_id
-		where
-			s.[name] = N'Entity'
-			and t.[name] = N'Users'
-	) = 0
 	EXEC sys.sp_cdc_enable_table
 		@source_schema = N'Entity',
 		@source_name   = N'Users',
 		@role_name     = NULL,
      @capture_instance = N'Entity_Users',
-		@supports_net_changes = 1;
+		@supports_net_changes = 1
         GO
 
 IF object_id('[Entity].[UserList]', 'P') IS NOT NULL
-    DROP PROCEDURE [Entity].[UserList]
+    DROP PROCEDURE [Entity].[UserList];
 GO
 
 CREATE PROCEDURE  [Entity].[UserList]
@@ -99,10 +92,11 @@ AS
         t.is_delete = 0
     ;
 RETURN
+
 GO
 
 IF object_id('[Entity].[UserMerge]', 'P') IS NOT NULL
-    DROP PROCEDURE [Entity].[UserMerge]
+    DROP PROCEDURE [Entity].[UserMerge];
 GO
 
 CREATE PROCEDURE  [Entity].[UserMerge]
@@ -153,10 +147,11 @@ AS
     ) OUTPUT
         $ACTION AS [action], ISNULL(DELETED.[user_id], INSERTED.[user_id]) AS user_id;
 RETURN
+
 GO
 
 IF object_id('[Entity].[UserDelete]', 'P') IS NOT NULL
-    DROP PROCEDURE [Entity].[UserDelete]
+    DROP PROCEDURE [Entity].[UserDelete];
 GO
 
 CREATE PROCEDURE  [Entity].[UserDelete]
@@ -165,11 +160,19 @@ AS
 
     SET NOCOUNT ON;
 
-RETURN
+
+    UPDATE [Entity].[Users] SET
+        is_delete = 1
+        ,dt = GETDATE()
+        
+    WHERE
+        user_id = @user_id
+    RETURN
+
 GO
 
 IF object_id('[Entity].[UserHistory]', 'P') IS NOT NULL
-    DROP PROCEDURE [Entity].[UserHistory]
+    DROP PROCEDURE [Entity].[UserHistory];
 GO
 
 CREATE PROCEDURE  [Entity].[UserHistory]
@@ -184,14 +187,16 @@ AS
     FROM
         cdc.Entity_Users_CT
     WHERE
-        [category_id] = @user_id
+        [user_id] = @user_id
     ORDER BY
         __$start_lsn DESC
     RETURN
 GO
 
+
+    
 IF object_id('[Entity].[Categories]', 'U') IS NOT NULL
-    DROP TABLE [Entity].[Categories]
+    DROP TABLE [Entity].[Categories];
 GO
 
 CREATE TABLE [Entity].[Categories] (
@@ -209,26 +214,19 @@ CREATE TABLE [Entity].[Categories] (
     ,[is_delete] BIT NOT NULL
     ,CONSTRAINT PK_Categories_CategoryID PRIMARY KEY CLUSTERED ([category_id] ASC)
 )
+GO
 
 
-IF (
-		select is_tracked_by_cdc from sys.tables t
-		inner join sys.schemas s
-		on t.schema_id = s.schema_id
-		where
-			s.[name] = N'Entity'
-			and t.[name] = N'Categories'
-	) = 0
 	EXEC sys.sp_cdc_enable_table
 		@source_schema = N'Entity',
 		@source_name   = N'Categories',
 		@role_name     = NULL,
      @capture_instance = N'Entity_Categories',
-		@supports_net_changes = 1;
+		@supports_net_changes = 1
         GO
 
 IF object_id('[Entity].[CategoryList]', 'P') IS NOT NULL
-    DROP PROCEDURE [Entity].[CategoryList]
+    DROP PROCEDURE [Entity].[CategoryList];
 GO
 
 CREATE PROCEDURE  [Entity].[CategoryList]
@@ -257,10 +255,11 @@ AS
         AND t.category_parent_id = category_parent_id
     ;
 RETURN
+
 GO
 
 IF object_id('[Entity].[CategoryMerge]', 'P') IS NOT NULL
-    DROP PROCEDURE [Entity].[CategoryMerge]
+    DROP PROCEDURE [Entity].[CategoryMerge];
 GO
 
 CREATE PROCEDURE  [Entity].[CategoryMerge]
@@ -337,10 +336,11 @@ AS
     ) OUTPUT
         $ACTION AS [action], ISNULL(DELETED.[category_id], INSERTED.[category_id]) AS category_id;
 RETURN
+
 GO
 
 IF object_id('[Entity].[CategoryDelete]', 'P') IS NOT NULL
-    DROP PROCEDURE [Entity].[CategoryDelete]
+    DROP PROCEDURE [Entity].[CategoryDelete];
 GO
 
 CREATE PROCEDURE  [Entity].[CategoryDelete]
@@ -352,11 +352,19 @@ AS
     EXEC [Security].[CheckRights] @user_id, @project_id, '[Entity].[Categories]', 'Delete';
     SET NOCOUNT ON;
 
-RETURN
+
+    UPDATE [Entity].[Categories] SET
+        is_delete = 1
+        ,dt = GETDATE()
+        ,user_id = @user_id
+    WHERE
+        category_id = @category_id
+    RETURN
+
 GO
 
 IF object_id('[Entity].[CategoryHistory]', 'P') IS NOT NULL
-    DROP PROCEDURE [Entity].[CategoryHistory]
+    DROP PROCEDURE [Entity].[CategoryHistory];
 GO
 
 CREATE PROCEDURE  [Entity].[CategoryHistory]
@@ -380,3 +388,5 @@ AS
     RETURN
 GO
 
+
+    

@@ -2,7 +2,7 @@
     "SqlGoFor": {
         "Language": "MSSQL",
         "Version": "2012",
-        "Database": "balance"
+        "Database": "test"
     },
     "Defaults": {
         "UseHistory": true,
