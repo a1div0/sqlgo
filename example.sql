@@ -193,8 +193,6 @@ AS
     RETURN
 GO
 
-
-    
 IF object_id('[Entity].[Categories]', 'U') IS NOT NULL
     DROP TABLE [Entity].[Categories];
 GO

@@ -14,7 +14,11 @@ import (
     "reflect"
 )
 
-type StringSlice []string
+type Configuration struct {
+    SqlGoFor SqlGoForCollect
+    Defaults DefaultsDescription
+    Tables []TableDescription
+}
 
 type SqlGoForCollect struct {
     Language string
@@ -47,11 +51,7 @@ type ColumnDescription struct {
     Nullable interface{}
 }
 
-type Configuration struct {
-    SqlGoFor SqlGoForCollect
-    Defaults DefaultsDescription
-    Tables []TableDescription
-}
+type StringSlice []string
 
 func main() {
 
@@ -85,18 +85,8 @@ func main() {
         return
     }
 
-    output_sql_file_name := get_filename_without_ext(file_name) + ".sql"
-
-    if (cfg.SqlGoFor.Language == "MSSQL") {
-        err = mssql_generate_sql(&cfg, output_sql_file_name)
-        if (err == nil) {
-            err = mssql_generate_command_parameters(&cfg)
-        }
-    } else {
-        fmt.Printf("Language '%s' is not support", cfg.SqlGoFor.Language)
-        return
-    }
-
+    filename_without_ext := get_filename_without_ext(file_name)
+    err = run(&cfg, filename_without_ext)
     if (err == nil) {
         fmt.Println("Done.")
     } else {
@@ -104,6 +94,36 @@ func main() {
         fmt.Println(err)
     }
     return
+}
+
+func run(cfg *Configuration, source_filename_without_ext string) (error) {
+
+    var err error
+
+    output_sql_file_name := get_filename_without_ext(source_filename_without_ext) + ".sql"
+    output_sqltest_file_name := get_filename_without_ext(source_filename_without_ext) + "_test.sql"
+
+    if (cfg.SqlGoFor.Language == "MSSQL") {
+        err = mssql_generate_sql(cfg, output_sql_file_name)
+        if (err != nil) {
+            return err
+        }
+
+        err = mssql_generate_sqltest(cfg, output_sqltest_file_name)
+        if (err != nil) {
+            return err
+        }
+
+        err = mssql_generate_command_parameters(cfg)
+        if (err != nil) {
+            return err
+        }
+
+    } else {
+        return fmt.Errorf("Language '%s' is not support", cfg.SqlGoFor.Language)
+    }
+
+    return nil
 }
 
 func get_filename_without_ext(full_file_name string) (string) {
@@ -197,15 +217,7 @@ func mssql_generate_sql(cfg *Configuration, file_name string) (error) {
     }
     defer file.Close()
 
-    global_use_history := false
-    for _, table := range cfg.Tables {
-        if !global_use_history && table.UseHistory.(bool) {
-            global_use_history = true
-            break
-        }
-    }
-
-    err = mssql_prepare(file, ver, cfg, global_use_history)
+    err = mssql_prepare(file, ver, cfg)
     if (err != nil) {
         return err
     }
@@ -235,22 +247,17 @@ func mssql_generate_sql(cfg *Configuration, file_name string) (error) {
         if (err != nil) {
             return err
         }
+    }
 
-        err = mssql_procedure_test(file, &table, ver)
-        if (err != nil) {
-            return err
-        }
-
-        err = mssql_finish(file)
-        if (err != nil) {
-            return err
-        }
+    err = mssql_finish(file)
+    if (err != nil) {
+        return err
     }
 
     return nil
 }
 
-func mssql_prepare(f *os.File, ver uint64, cfg *Configuration, global_use_history bool) (error) {
+func mssql_prepare(f *os.File, ver uint64, cfg *Configuration) (error) {
 
     script := `
         // USE [master];
@@ -303,7 +310,7 @@ func mssql_prepare(f *os.File, ver uint64, cfg *Configuration, global_use_histor
         // GO
     `
 
-    if global_use_history {
+    if global_use_history_get(cfg) {
         script = strings.ReplaceAll(script, "%script_cdc_on%", script_cdc_on)
     }
     script = strings.ReplaceAll(script, "        // ", "")
@@ -698,10 +705,255 @@ func mssql_procedure_history(f *os.File, table *TableDescription, ver uint64) (e
     return nil
 }
 
-func mssql_procedure_test(f *os.File, table *TableDescription, ver uint64) (error) {
+func mssql_generate_sqltest(cfg *Configuration, file_name string) (error) {
+    file, err := os.Create(file_name)
+    if (err != nil) {
+        return err
+    }
+    defer file.Close()
 
-    // EXEC [Entity].[CategoryMerge] 0, 1, 2, 0, 0, 'test cat new 4', 0, 1.2, 'https://image.url', 1
+    mssql_test_prepare(file, cfg)
+
+    for _, table := range cfg.Tables {
+        err = mssql_test_table(file, &table)
+        if (err != nil) {
+            return err
+        }
+    }
+
+    mssql_test_tail(file, cfg)
+
     return nil
+}
+
+func mssql_test_prepare(f *os.File, cfg *Configuration) {
+    script := `
+        // BEGIN TRAN;
+        //
+        // SET NOCOUNT ON;
+        //
+        // CREATE TABLE [Security].[__TestProc__CheckRights] (
+        //     [user_id] BIGINT
+        //     ,[project_id] BIGINT
+        //     ,[table_name] NVARCHAR(255)
+        //     ,[operation] NVARCHAR(64)
+        // )
+        // GO
+        //
+        // ALTER PROCEDURE [Security].[CheckRights]
+        //     @user_id BIGINT
+        //     ,@project_id BIGINT
+        //     ,@table_name NVARCHAR(255)
+        //     ,@operation NVARCHAR(64)
+        // AS
+        //     INSERT INTO [Security].[__TestProc__CheckRights] ([user_id], [project_id], [table_name], [operation])
+        //     VALUES (@user_id, @project_id, @table_name, @operation)
+        //
+        // RETURN
+        // GO
+        //
+    `
+
+    script = strings.ReplaceAll(script, "        // ", "")
+    script = strings.ReplaceAll(script, "        //", "")
+
+    fmt.Fprintln(f, script)
+}
+
+type ColumnTestDescription struct {
+    Name string
+    Type string
+    TestValue string
+    UseInListResult bool
+    //Nullable bool
+}
+
+func mssql_test_table(f *os.File, table *TableDescription) (error) {
+
+    script := `
+        // DECLARE @%one_row%_merge_result TABLE ([op] NVARCHAR(64), [%one_row%_id] BIGINT);
+        // INSERT INTO @%one_row%_merge_result
+        // EXEC %MEGRE%;
+        //
+        // DECLARE @%one_row%_id BIGINT = (SELECT TOP 1 [%one_row%_id] FROM @%one_row%_merge_result);
+        // DECLARE @%one_row%_tmp TABLE (%cols_tmp_table_with_types%);
+        // INSERT INTO @%one_row%_tmp
+        // EXEC %LIST%;
+        //
+        // INSERT INTO @%one_row%_tmp(%cols_tmp_table%)
+        // VALUES (%inserted_values%);
+        //
+        // DECLARE @%one_row%_res_cnt INT = (SELECT
+        //     COUNT(*)
+        // FROM
+        //     (SELECT DISTINCT * FROM @%one_row%_tmp WHERE [%one_row%_id] = @%one_row%_id) AS t);
+        // IF @%one_row%_res_cnt > 1
+        // BEGIN
+        //     THROW 51000, 'FAIL: List or Insert', 1;
+        // END;
+        //
+        // DELETE FROM @%one_row%_tmp;
+        //
+        // EXEC %DELETE%;
+        //
+        // INSERT INTO @%one_row%_tmp
+        // EXEC %LIST%;
+        //
+        // SET @%one_row%_res_cnt = (SELECT
+        //     COUNT(*)
+        // FROM
+        //     (SELECT DISTINCT * FROM @%one_row%_tmp WHERE [%one_row%_id] = @%one_row%_id) AS t);
+        // IF @%one_row%_res_cnt > 0
+        // BEGIN
+        //     THROW 51000, 'FAIL: List or Delete', 1;
+        // END;
+        //
+    `
+    script = strings.ReplaceAll(script, "        // ", "")
+    script = strings.ReplaceAll(script, "        //", "")
+
+    _, one_row, procedure_name := init_names(table, "Merge")
+
+    cols := make([]ColumnTestDescription, 0, 5 + len(table.Cols))
+    cols = append(cols, ColumnTestDescription {Name: one_row + "_id", Type: "bigint", TestValue: "0", UseInListResult: true})
+
+    if table.UseUserId.(bool) {
+        cols = append(cols, ColumnTestDescription {Name: "user_id", Type: "bigint", TestValue: "123", UseInListResult: false})
+    }
+    if table.UseProjectId.(bool) {
+        cols = append(cols, ColumnTestDescription {Name: "project_id", Type: "bigint", TestValue: "321", UseInListResult: false})
+    }
+    if table.UseHierarhy.(bool) {
+        cols = append(cols, ColumnTestDescription {Name: one_row + "_parent_id", Type: "bigint", TestValue: "0", UseInListResult: true})
+        cols = append(cols, ColumnTestDescription {Name: one_row + "_is_folder", Type: "bit", TestValue: "0", UseInListResult: true})
+    }
+    for num, col := range table.Cols {
+        type_name := strings.ToLower(col.Type)
+        value := ""
+
+        if strings.Contains(type_name, "varchar") {
+            value = "'" + col.Name + " - dummy value" + "'"
+        } else if strings.HasPrefix(type_name, "date") {
+            value = "'2020-05-02 15:27:00.000'"
+        } else if type_name == "bit" {
+            value = "1"
+        } else {
+            value = fmt.Sprintf("%d", num)
+        }
+
+        cols = append(cols, ColumnTestDescription {Name: one_row + "_" + col.Name, Type: col.Type, TestValue: value, UseInListResult: true})
+    }
+
+    exec_merge := procedure_name + " " + get_test_values(&cols, false)
+    script = strings.ReplaceAll(script, "%MEGRE%", exec_merge)
+
+    cols_tmp_table_with_types := get_test_cols_tmp_table_with_types(&cols)
+    script = strings.ReplaceAll(script, "%cols_tmp_table_with_types%", cols_tmp_table_with_types)
+
+    cols_tmp_table:= get_test_cols_tmp_table(&cols)
+    script = strings.ReplaceAll(script, "%cols_tmp_table%", cols_tmp_table)
+
+    exec_list := ""
+    if table.UseUserId.(bool) {
+        exec_list += ",123"
+    }
+    if table.UseProjectId.(bool) {
+        exec_list += ",321"
+    }
+    if table.UseHierarhy.(bool) {
+        exec_list += ",0"
+    }
+    if (len(exec_list) > 0) {
+        exec_list = exec_list[1:]
+    }
+    _, _, procedure_name = init_names(table, "List")
+    script = strings.ReplaceAll(script, "%LIST%", procedure_name + " " + exec_list)
+
+    cols[0].TestValue = "@%one_row%_id"
+
+    inserted_values := get_test_values(&cols, true)
+    script = strings.ReplaceAll(script, "%inserted_values%", inserted_values)
+
+    _, _, procedure_name = init_names(table, "Delete")
+    exec_list = " @%one_row%_id"
+    if table.UseUserId.(bool) {
+        exec_list += ",123"
+    }
+    if table.UseProjectId.(bool) {
+        exec_list += ",321"
+    }
+    script = strings.ReplaceAll(script, "%DELETE%", procedure_name + exec_list)
+
+    script = strings.ReplaceAll(script, "%one_row%", one_row)
+
+    fmt.Fprintln(f, script)
+
+    return nil
+}
+
+func mssql_test_tail(f *os.File, cfg *Configuration) {
+    script := `
+        // SELECT * FROM [Security].[__TestProc__CheckRights]
+        //
+        // ROLLBACK TRAN
+    `
+
+    script = strings.ReplaceAll(script, "        // ", "")
+    script = strings.ReplaceAll(script, "        //", "")
+
+    fmt.Fprintln(f, script)
+}
+
+func get_test_values(cols *[]ColumnTestDescription, only_list bool) string {
+    result := ""
+    for _, d := range *cols {
+        if (only_list && !d.UseInListResult) {
+            continue
+        }
+    	result += ", " + d.TestValue
+    }
+    return result[2:]
+}
+
+func get_test_cols_tmp_table_with_types(cols *[]ColumnTestDescription) string {
+    result := ""
+    for _, d := range *cols {
+        if d.UseInListResult {
+        	result += ", [" + d.Name + "] " + strings.ToUpper(d.Type)
+        }
+    }
+    return result[2:]
+}
+
+func get_test_cols_tmp_table(cols *[]ColumnTestDescription) string {
+    result := ""
+    for _, d := range *cols {
+        if d.UseInListResult {
+            result += ", [" + d.Name + "]"
+        }
+    }
+    return result[2:]
+}
+
+func map_values_to_slice(values *[]string, myMap *map[string]string) {
+    *values = make([]string, 0, len(*myMap))
+
+    for _, v := range *myMap {
+    	*values = append(*values, v)
+    }
+}
+
+func global_use_history_get(cfg *Configuration) bool {
+
+    global_use_history := false
+    for _, table := range cfg.Tables {
+        if !global_use_history && table.UseHistory.(bool) {
+            global_use_history = true
+            break
+        }
+    }
+    return global_use_history
+
 }
 
 func mssql_generate_command_parameters(cfg *Configuration) (error) {
