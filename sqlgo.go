@@ -71,6 +71,7 @@ func main() {
         fmt.Printf("Error load '%s': %s\n", file_name, err)
         return
     }
+    defer file.Close()
 
     decoder := json.NewDecoder(file)
     err = decoder.Decode(&cfg)
@@ -102,6 +103,7 @@ func run(cfg *Configuration, source_filename_without_ext string) (error) {
 
     output_sql_file_name := get_filename_without_ext(source_filename_without_ext) + ".sql"
     output_sqltest_file_name := get_filename_without_ext(source_filename_without_ext) + "_test.sql"
+    output_cmd_file_name := get_filename_without_ext(source_filename_without_ext) + "_cmd.json"
 
     if (cfg.SqlGoFor.Language == "MSSQL") {
         err = mssql_generate_sql(cfg, output_sql_file_name)
@@ -114,7 +116,7 @@ func run(cfg *Configuration, source_filename_without_ext string) (error) {
             return err
         }
 
-        err = mssql_generate_command_parameters(cfg)
+        err = mssql_generate_command_parameters(cfg, output_cmd_file_name)
         if (err != nil) {
             return err
         }
@@ -765,7 +767,6 @@ type ColumnTestDescription struct {
     Type string
     TestValue string
     UseInListResult bool
-    //Nullable bool
 }
 
 func mssql_test_table(f *os.File, table *TableDescription) (error) {
@@ -956,6 +957,6 @@ func global_use_history_get(cfg *Configuration) bool {
 
 }
 
-func mssql_generate_command_parameters(cfg *Configuration) (error) {
+func mssql_generate_command_parameters(cfg *Configuration, file_name string) (error) {
     return nil
 }
